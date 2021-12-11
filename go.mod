@@ -1,4 +1,4 @@
-module terraform-registry-scraper
+module github.com/ulucinar/terraform-registry-scraper
 
 go 1.17
 
