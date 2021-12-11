@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package main
+package meta
 
 import (
 	"bytes"
@@ -32,7 +32,6 @@ import (
 	"github.com/tmccombs/hcl2json/convert"
 	"github.com/yuin/goldmark"
 	"golang.org/x/net/html"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -342,26 +341,4 @@ func (pm *ProviderMetadata) ScrapeRepo(path string) error {
 		pm.Resources[r.Name] = r
 		return nil
 	}), "cannot scrape Terraform registry")
-}
-
-func main() {
-	pm := NewProviderMetadata("hashicorp/terraform-provider-azurerm",
-		`//code[@class="language-terraform" or @class="language-hcl"]/text()`,
-		`//text()[contains(., "description") and contains(., "subcategory")]`,
-		`//ul/li//code[1]/text()`)
-
-	//err := pm.ScrapeRepo("/tmp/scrape/")
-	err := pm.ScrapeRepo("/Users/alper/data/workspaces/github.com/hashicorp/terraform-provider-azurerm/website/docs/r")
-	if err != nil {
-		panic(err)
-	}
-
-	out, err := yaml.Marshal(pm)
-	if err != nil {
-		panic(err)
-	}
-
-	if err := ioutil.WriteFile("provider-metadata.yaml", out, 0644); err != nil {
-		panic(err)
-	}
 }
