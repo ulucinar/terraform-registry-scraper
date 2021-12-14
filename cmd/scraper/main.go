@@ -16,31 +16,33 @@ limitations under the License.
 package main
 
 import (
-	"io/ioutil"
+	"os"
+	"path/filepath"
 
-	"gopkg.in/yaml.v3"
+	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/ulucinar/terraform-registry-scraper/pkg/meta"
 )
 
 func main() {
-	pm := meta.NewProviderMetadata("hashicorp/terraform-provider-azurerm",
-		`//code[@class="language-terraform" or @class="language-hcl"]/text()`,
-		`//text()[contains(., "description") and contains(., "subcategory")]`,
-		`//ul/li//code[1]/text()`)
+	var (
+		app                   = kingpin.New(filepath.Base(os.Args[0]), "Terraform Registry provider metadata scraper.").DefaultEnvars()
+		outFile               = app.Flag("out", "Provider metadata output file path").Short('o').Default("provider-metadata.yaml").OpenFile(os.O_CREATE, 0644)
+		providerName          = app.Flag("name", "Provider name").Short('n').Required().String()
+		codeXPath             = app.Flag("code-xpath", "Code XPath expression").Default(`//code[@class="language-terraform" or @class="language-hcl"]/text()`).String()
+		preludeXPath          = app.Flag("prelude-xpath", "Prelude XPath expression").Default(`//text()[contains(., "description") and contains(., "subcategory")]`).String()
+		fieldXPath            = app.Flag("field-xpath", "Field XPath expression").Default(`//ul/li//code[1]/text()`).String()
+		repoPath              = app.Flag("repo", "Terraform provider repo path").Short('r').Required().ExistingDir()
+		skipExampleErrors     = app.Flag("skip-example-errors", "Skip errors encountered while parsing example manifests").Default("false").Bool()
+		skipExampleReferences = app.Flag("skip-example-refs", "Skip parsing references in example manifests").Default("false").Bool()
+	)
+	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	//err := pm.ScrapeRepo("/tmp/scrape/")
-	err := pm.ScrapeRepo("/Users/alper/data/workspaces/github.com/hashicorp/terraform-provider-azurerm/website/docs/r")
-	if err != nil {
-		panic(err)
-	}
-
-	out, err := yaml.Marshal(pm)
-	if err != nil {
-		panic(err)
-	}
-
-	if err := ioutil.WriteFile("provider-metadata.yaml", out, 0644); err != nil {
-		panic(err)
-	}
+	pm := meta.NewProviderMetadata(*providerName, *codeXPath, *preludeXPath, *fieldXPath)
+	kingpin.FatalIfError(pm.ScrapeRepo(&meta.ScrapeConfiguration{
+		SkipExampleErrors:     *skipExampleErrors,
+		SkipExampleReferences: *skipExampleReferences,
+		RepoPath:              *repoPath,
+	}), "Failed to scrape Terraform provider metadata")
+	kingpin.FatalIfError(pm.Store((*outFile).Name()), "Failed to store Terraform provider metadata to file: %s", (*outFile).Name())
 }

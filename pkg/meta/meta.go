@@ -32,6 +32,7 @@ import (
 	"github.com/tmccombs/hcl2json/convert"
 	"github.com/yuin/goldmark"
 	"golang.org/x/net/html"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -60,18 +61,29 @@ func NewProviderMetadata(name, codeXPath, preludeXPath, fieldPathXPath string) *
 	}
 }
 
+func NewProviderMetadataFromFile(path string) (*ProviderMetadata, error) {
+	buff, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to read metadata file %q", path)
+	}
+
+	metadata := &ProviderMetadata{}
+	return metadata, errors.Wrap(yaml.Unmarshal(buff, metadata), "failed to unmarshal provider metadata")
+}
+
 type ResourceExample struct {
 	Manifest   string            `yaml:"manifest"`
-	References map[string]string `yaml:"references"`
+	References map[string]string `yaml:"references,omitempty"`
 }
 
 type Resource struct {
 	SubCategory  string            `yaml:"subCategory"`
-	Description  string            `yaml:"description"`
+	Description  string            `yaml:"description,omitempty"`
 	Name         string            `yaml:"name"`
 	TitleName    string            `yaml:"titleName"`
-	Examples     []ResourceExample `yaml:"examples"`
+	Examples     []ResourceExample `yaml:"examples,omitempty"`
 	ArgumentDocs map[string]string `yaml:"argumentDocs"`
+	scrapeConfig *ScrapeConfiguration
 }
 
 func (r *Resource) addExampleManifest(body *hclsyntax.Block, manifest []byte) error {
@@ -106,7 +118,12 @@ func (r *Resource) scrapeExamples(doc *html.Node, codeElXPath string) error {
 		parser := hclparse.NewParser()
 		f, diag := parser.ParseHCL([]byte(n.Data), "example.hcl")
 		if diag.HasErrors() {
-			return errors.Wrap(diag, "failed to parse example Terraform configuration")
+			err := errors.Wrapf(diag, "failed to parse example Terraform configuration. Configuration:\n%s", n.Data)
+			if !r.scrapeConfig.SkipExampleErrors {
+				return err
+			}
+			fmt.Printf("%v\n", err)
+			continue
 		}
 
 		body, ok := f.Body.(*hclsyntax.Body)
@@ -127,10 +144,16 @@ func (r *Resource) scrapeExamples(doc *html.Node, codeElXPath string) error {
 		r.Name = resourceName
 	}
 
+	if r.Name == "" {
+		r.Name = resourceName
+	}
 	return nil
 }
 
 func (r *Resource) findReferences(b *hclsyntax.Block) (map[string]string, error) {
+	if r.scrapeConfig.SkipExampleReferences {
+		return map[string]string{}, nil
+	}
 	refs := make(map[string]string)
 	if b.Labels[0] != r.Name {
 		return refs, nil
@@ -153,7 +176,7 @@ func (r *Resource) findReferences(b *hclsyntax.Block) (map[string]string, error)
 			ref = fmt.Sprintf("%s.%s", tr.Name, ta.Name)
 		}
 		if ref == "" {
-			return refs, nil
+			continue
 		}
 		if v, ok := refs[name]; ok && v != ref {
 			return nil, errors.Errorf("attribute %s.%s refers to %s. New reference: %s", r.Name, name, v, ref)
@@ -213,8 +236,10 @@ func (r *Resource) findExampleBlock(file *hcl.File, blocks hclsyntax.Blocks, res
 func (r *Resource) scrapePrelude(doc *html.Node, preludeXPath string) error {
 	// parse prelude
 	nodes := htmlquery.Find(doc, preludeXPath)
+	rawData := ""
 	if len(nodes) > 0 {
 		n := nodes[0]
+		rawData = n.Data
 		lines := strings.Split(n.Data, "\n")
 		descIndex := -1
 		for i, l := range lines {
@@ -241,9 +266,9 @@ func (r *Resource) scrapePrelude(doc *html.Node, preludeXPath string) error {
 		r.Description = strings.TrimSpace(strings.Replace(r.Description, "|-", "", 1))
 	}
 
-	if r.Description == "" || r.SubCategory == "" || r.TitleName == "" {
-		return errors.Errorf("failed to parse prelude. Description: %s, Subcategory: %s, Title name: %s",
-			r.Description, r.SubCategory, r.TitleName)
+	if r.SubCategory == "" || r.TitleName == "" {
+		return errors.Errorf("failed to parse prelude. Description: %s, Subcategory: %s, Title name: %s. Raw data:%s\n",
+			r.Description, r.SubCategory, r.TitleName, rawData)
 	}
 	return nil
 }
@@ -297,10 +322,10 @@ func (r *Resource) scrapeDocString(n *html.Node, attrName *string, processed map
 	return sb.String()
 }
 
-// Scrape scrapes resource metadata from the specified HTML doc.
+// scrape scrapes resource metadata from the specified HTML doc.
 // filename is not always the precise resource name, hence,
 // it returns the resource name scraped from the doc.
-func (r *Resource) Scrape(path, codeElXPath, preludeXPath, docXPath string) error {
+func (r *Resource) scrape(path, codeElXPath, preludeXPath, docXPath string) error {
 	source, err := ioutil.ReadFile(path)
 	if err != nil {
 		return errors.Wrap(err, "failed to read markdown file")
@@ -325,20 +350,36 @@ func (r *Resource) Scrape(path, codeElXPath, preludeXPath, docXPath string) erro
 	return r.scrapeExamples(doc, codeElXPath)
 }
 
-func (pm *ProviderMetadata) ScrapeRepo(path string) error {
-	return errors.Wrap(filepath.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
+type ScrapeConfiguration struct {
+	SkipExampleErrors     bool
+	SkipExampleReferences bool
+	RepoPath              string
+}
+
+func (pm *ProviderMetadata) ScrapeRepo(config *ScrapeConfiguration) error {
+	return errors.Wrap(filepath.WalkDir(config.RepoPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return errors.Wrap(err, "failed to traverse Terraform registry")
 		}
 		if d.IsDir() || filepath.Ext(d.Name()) != extMarkdown {
 			return nil
 		}
-		r := &Resource{}
-		if err := r.Scrape(path, pm.codeXPath, pm.preludeXPath, pm.fieldDocXPath); err != nil {
+		r := &Resource{
+			scrapeConfig: config,
+		}
+		if err := r.scrape(path, pm.codeXPath, pm.preludeXPath, pm.fieldDocXPath); err != nil {
 			return errors.Wrap(err, "failed to scrape resource metadata")
 		}
 
 		pm.Resources[r.Name] = r
 		return nil
 	}), "cannot scrape Terraform registry")
+}
+
+func (pm *ProviderMetadata) Store(path string) error {
+	out, err := yaml.Marshal(pm)
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal provider metadata to YAML")
+	}
+	return errors.Wrapf(ioutil.WriteFile(path, out, 0644), "failed to write provider metada file: %s", path)
 }
