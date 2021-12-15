@@ -49,15 +49,17 @@ type ProviderMetadata struct {
 	codeXPath     string
 	preludeXPath  string
 	fieldDocXPath string
+	importXPath   string
 }
 
-func NewProviderMetadata(name, codeXPath, preludeXPath, fieldPathXPath string) *ProviderMetadata {
+func NewProviderMetadata(name, codeXPath, preludeXPath, fieldPathXPath, importXPath string) *ProviderMetadata {
 	return &ProviderMetadata{
 		Name:          name,
 		Resources:     make(map[string]*Resource),
 		codeXPath:     codeXPath,
 		preludeXPath:  preludeXPath,
 		fieldDocXPath: fieldPathXPath,
+		importXPath:   importXPath,
 	}
 }
 
@@ -77,13 +79,14 @@ type ResourceExample struct {
 }
 
 type Resource struct {
-	SubCategory  string            `yaml:"subCategory"`
-	Description  string            `yaml:"description,omitempty"`
-	Name         string            `yaml:"name"`
-	TitleName    string            `yaml:"titleName"`
-	Examples     []ResourceExample `yaml:"examples,omitempty"`
-	ArgumentDocs map[string]string `yaml:"argumentDocs"`
-	scrapeConfig *ScrapeConfiguration
+	SubCategory      string            `yaml:"subCategory"`
+	Description      string            `yaml:"description,omitempty"`
+	Name             string            `yaml:"name"`
+	TitleName        string            `yaml:"titleName"`
+	Examples         []ResourceExample `yaml:"examples,omitempty"`
+	ArgumentDocs     map[string]string `yaml:"argumentDocs"`
+	ImportStatements []string          `yaml:"importStatements"`
+	scrapeConfig     *ScrapeConfiguration
 }
 
 func (r *Resource) addExampleManifest(body *hclsyntax.Block, manifest []byte) error {
@@ -322,10 +325,17 @@ func (r *Resource) scrapeDocString(n *html.Node, attrName *string, processed map
 	return sb.String()
 }
 
+func (r *Resource) scrapeImportStatements(doc *html.Node, importXPath string) {
+	nodes := htmlquery.Find(doc, importXPath)
+	for _, n := range nodes {
+		r.ImportStatements = append(r.ImportStatements, strings.TrimSpace(n.Data))
+	}
+}
+
 // scrape scrapes resource metadata from the specified HTML doc.
 // filename is not always the precise resource name, hence,
 // it returns the resource name scraped from the doc.
-func (r *Resource) scrape(path, codeElXPath, preludeXPath, docXPath string) error {
+func (r *Resource) scrape(path, codeElXPath, preludeXPath, docXPath, importXPath string) error {
 	source, err := ioutil.ReadFile(path)
 	if err != nil {
 		return errors.Wrap(err, "failed to read markdown file")
@@ -346,6 +356,7 @@ func (r *Resource) scrape(path, codeElXPath, preludeXPath, docXPath string) erro
 	}
 
 	r.scrapeFieldDocs(doc, docXPath)
+	r.scrapeImportStatements(doc, importXPath)
 
 	return r.scrapeExamples(doc, codeElXPath)
 }
@@ -367,7 +378,7 @@ func (pm *ProviderMetadata) ScrapeRepo(config *ScrapeConfiguration) error {
 		r := &Resource{
 			scrapeConfig: config,
 		}
-		if err := r.scrape(path, pm.codeXPath, pm.preludeXPath, pm.fieldDocXPath); err != nil {
+		if err := r.scrape(path, pm.codeXPath, pm.preludeXPath, pm.fieldDocXPath, pm.importXPath); err != nil {
 			return errors.Wrap(err, "failed to scrape resource metadata")
 		}
 

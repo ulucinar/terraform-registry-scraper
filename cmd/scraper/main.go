@@ -32,13 +32,14 @@ func main() {
 		codeXPath             = app.Flag("code-xpath", "Code XPath expression").Default(`//code[@class="language-terraform" or @class="language-hcl"]/text()`).String()
 		preludeXPath          = app.Flag("prelude-xpath", "Prelude XPath expression").Default(`//text()[contains(., "description") and contains(., "subcategory")]`).String()
 		fieldXPath            = app.Flag("field-xpath", "Field XPath expression").Default(`//ul/li//code[1]/text()`).String()
+		importXPath           = app.Flag("import-xpath", "Import statements XPath expression").Default(`//code[@class="language-shell"]/text()`).String()
 		repoPath              = app.Flag("repo", "Terraform provider repo path").Short('r').Required().ExistingDir()
 		skipExampleErrors     = app.Flag("skip-example-errors", "Skip errors encountered while parsing example manifests").Default("false").Bool()
 		skipExampleReferences = app.Flag("skip-example-refs", "Skip parsing references in example manifests").Default("false").Bool()
 	)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	pm := meta.NewProviderMetadata(*providerName, *codeXPath, *preludeXPath, *fieldXPath)
+	pm := meta.NewProviderMetadata(*providerName, *codeXPath, *preludeXPath, *fieldXPath, *importXPath)
 	kingpin.FatalIfError(pm.ScrapeRepo(&meta.ScrapeConfiguration{
 		SkipExampleErrors:     *skipExampleErrors,
 		SkipExampleReferences: *skipExampleReferences,
