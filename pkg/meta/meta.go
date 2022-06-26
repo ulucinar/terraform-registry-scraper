@@ -73,9 +73,13 @@ func NewProviderMetadataFromFile(path string) (*ProviderMetadata, error) {
 	return metadata, errors.Wrap(yaml.Unmarshal(buff, metadata), "failed to unmarshal provider metadata")
 }
 
+type Dependencies map[string]string
+
 type ResourceExample struct {
-	Manifest   string            `yaml:"manifest"`
-	References map[string]string `yaml:"references,omitempty"`
+	Name         string            `yaml:"name"`
+	Manifest     string            `yaml:"manifest"`
+	References   map[string]string `yaml:"references,omitempty"`
+	Dependencies Dependencies      `yaml:"dependencies,omitempty"`
 }
 
 type Resource struct {
@@ -89,19 +93,13 @@ type Resource struct {
 	scrapeConfig     *ScrapeConfiguration
 }
 
-func (r *Resource) addExampleManifest(body *hclsyntax.Block, manifest []byte) error {
-	out := bytes.Buffer{}
-	err := json.Indent(&out, manifest, "", "  ")
-	if err != nil {
-		return errors.Wrap(err, "unable to format JSON example manifest")
-	}
-
-	refs, err := r.findReferences(body)
+func (r *Resource) addExampleManifest(file *hcl.File, body *hclsyntax.Block) error {
+	refs, err := r.findReferences(file, body)
 	if err != nil {
 		return err
 	}
 	r.Examples = append(r.Examples, ResourceExample{
-		Manifest:   out.String(),
+		Name:       body.Labels[1],
 		References: refs,
 	})
 	return nil
@@ -153,7 +151,7 @@ func (r *Resource) scrapeExamples(doc *html.Node, codeElXPath string) error {
 	return nil
 }
 
-func (r *Resource) findReferences(b *hclsyntax.Block) (map[string]string, error) {
+func (r *Resource) findReferences(file *hcl.File, b *hclsyntax.Block) (map[string]string, error) {
 	if r.scrapeConfig.SkipExampleReferences {
 		return map[string]string{}, nil
 	}
@@ -165,18 +163,7 @@ func (r *Resource) findReferences(b *hclsyntax.Block) (map[string]string, error)
 		ref := ""
 		switch e := attr.Expr.(type) {
 		case *hclsyntax.ScopeTraversalExpr:
-			if len(e.Traversal) < 2 {
-				return refs, nil
-			}
-			tr, ok := e.Traversal[0].(hcl.TraverseRoot)
-			if !ok {
-				return refs, nil
-			}
-			ta, ok := e.Traversal[len(e.Traversal)-1].(hcl.TraverseAttr)
-			if !ok {
-				return refs, nil
-			}
-			ref = fmt.Sprintf("%s.%s", tr.Name, ta.Name)
+			ref = string(file.Bytes[e.Range().Start.Byte:e.Range().End.Byte])
 		}
 		if ref == "" {
 			continue
@@ -200,10 +187,33 @@ func suffixMatch(label, resourceName string, limit int) bool {
 	return false
 }
 
+func convertManifest2JSON(file *hcl.File, b *hclsyntax.Block) (string, error) {
+	buff, err := convert.File(&hcl.File{
+		Body:  b.Body,
+		Bytes: file.Bytes,
+	}, convert.Options{})
+	if err != nil {
+		return "", errors.Wrap(err, "failed to format as JSON")
+	}
+	out := bytes.Buffer{}
+	err = json.Indent(&out, buff, "", "  ")
+	if err != nil {
+		return "", errors.Wrap(err, "unable to format JSON example manifest")
+	}
+	return out.String(), nil
+}
+
 func (r *Resource) findExampleBlock(file *hcl.File, blocks hclsyntax.Blocks, resourceName *string, exactMatch bool) error {
+	dependencies := make(map[string]string)
 	for _, b := range blocks {
+		depKey := fmt.Sprintf("%s.%s", b.Labels[0], b.Labels[1])
+		m, err := convertManifest2JSON(file, b)
+		if err != nil {
+			return errors.Wrap(err, "failed to convert example manifest to JSON")
+		}
 		if b.Labels[0] != *resourceName {
 			if exactMatch {
+				dependencies[depKey] = m
 				continue
 			}
 
@@ -211,20 +221,14 @@ func (r *Resource) findExampleBlock(file *hcl.File, blocks hclsyntax.Blocks, res
 				*resourceName = b.Labels[0]
 				exactMatch = true
 			} else {
+				dependencies[depKey] = m
 				continue
 			}
 		}
-
-		buff, err := convert.File(&hcl.File{
-			Body:  b.Body,
-			Bytes: file.Bytes,
-		}, convert.Options{})
-		if err != nil {
-			return errors.Wrap(err, "failed to format as JSON")
-		}
-
 		r.Name = *resourceName
-		err = r.addExampleManifest(b, buff)
+		err = r.addExampleManifest(file, b)
+		r.Examples[len(r.Examples)-1].Manifest = m
+		r.Examples[len(r.Examples)-1].Dependencies = dependencies
 		if err != nil {
 			return errors.Wrap(err, "failed to add example manifest to resource")
 		}
